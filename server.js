@@ -127,12 +127,93 @@ app.post("/generate", async (req, res) => {
       });
     }
 
-    const frameUrl = targetFrame.url();
+    const targetFrameUrl = targetFrame.url();
 
-    const generateButton = targetFrame.locator("#generateButtonEl").first();
-    await generateButton.waitFor({ state: "attached", timeout: 30000 });
+    const textareaDebug = await targetFrame.locator("textarea").evaluateAll((els) => {
+      return els.map((el, i) => {
+        const r = el.getBoundingClientRect();
+        const s = window.getComputedStyle(el);
+        return {
+          index: i,
+          id: el.id || "",
+          className: el.className || "",
+          placeholder: el.getAttribute("placeholder") || "",
+          display: s.display,
+          visibility: s.visibility,
+          opacity: s.opacity,
+          width: r.width,
+          height: r.height,
+          disabled: el.disabled,
+          valuePreview: (el.value || "").slice(0, 80)
+        };
+      });
+    });
 
-    const buttonDebug = await generateButton.evaluate((el) => {
+    const promptSetResult = await targetFrame.evaluate((promptText) => {
+      const textareas = Array.from(document.querySelectorAll("textarea"));
+
+      if (!textareas.length) {
+        return { ok: false, reason: "No textarea elements found" };
+      }
+
+      let chosen = null;
+
+      for (const el of textareas) {
+        if (el.disabled) continue;
+
+        const placeholder = (el.getAttribute("placeholder") || "").toLowerCase();
+        const cls = (el.className || "").toLowerCase();
+        const id = (el.id || "").toLowerCase();
+
+        if (
+          placeholder.includes("woman") ||
+          placeholder.includes("tai chi") ||
+          cls.includes("paragraph-input") ||
+          id === "input"
+        ) {
+          chosen = el;
+          break;
+        }
+      }
+
+      if (!chosen) {
+        chosen = textareas.find((el) => !el.disabled) || null;
+      }
+
+      if (!chosen) {
+        return { ok: false, reason: "No enabled textarea found" };
+      }
+
+      chosen.focus();
+      chosen.value = promptText;
+      chosen.dispatchEvent(new Event("input", { bubbles: true }));
+      chosen.dispatchEvent(new Event("change", { bubbles: true }));
+      chosen.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true }));
+
+      return {
+        ok: true,
+        chosenId: chosen.id || "",
+        chosenClass: chosen.className || "",
+        chosenPlaceholder: chosen.getAttribute("placeholder") || "",
+        finalValue: chosen.value
+      };
+    }, prompt);
+
+    if (!promptSetResult.ok) {
+      await browser.close();
+      return res.status(500).json({
+        ok: false,
+        error: "Prompt set failed",
+        titleBefore,
+        urlBefore,
+        targetFrameUrl,
+        frameDebug,
+        textareaDebug,
+        promptSetResult
+      });
+    }
+
+    const buttonDebug = await targetFrame.locator("#generateButtonEl").evaluate((el) => {
       const r = el.getBoundingClientRect();
       const s = window.getComputedStyle(el);
       return {
@@ -147,34 +228,7 @@ app.post("/generate", async (req, res) => {
       };
     });
 
-    const frameBody = targetFrame.locator("body").first();
-    await frameBody.click({ position: { x: 200, y: 200 }, timeout: 15000 }).catch(() => {});
-
-    for (let i = 0; i < 6; i++) {
-      await page.keyboard.press("Tab");
-      await page.waitForTimeout(300);
-    }
-
-    await page.keyboard.type(prompt, { delay: 40 });
-    await page.waitForTimeout(1000);
-
-    const activeElementDebug = await targetFrame.evaluate(() => {
-      const el = document.activeElement;
-      if (!el) return null;
-
-      const r = el.getBoundingClientRect();
-      return {
-        tag: el.tagName,
-        id: el.id || "",
-        className: el.className || "",
-        placeholder: el.getAttribute?.("placeholder") || "",
-        text: (el.innerText || el.textContent || "").trim().slice(0, 200),
-        width: r.width,
-        height: r.height
-      };
-    });
-
-    await generateButton.evaluate((el) => el.click());
+    await targetFrame.locator("#generateButtonEl").evaluate((el) => el.click());
 
     await page.waitForTimeout(25000);
 
@@ -182,25 +236,7 @@ app.post("/generate", async (req, res) => {
     const urlAfter = page.url();
     const bodyText = await page.locator("body").innerText().catch(() => "");
 
-    const resultImg = await targetFrame.evaluate(() => {
-      const img =
-        document.querySelector("#resultImgEl") ||
-        document.querySelector("img[src*='image-generation']") ||
-        document.querySelector("img");
-
-      if (!img) return null;
-
-      return {
-        id: img.id || "",
-        src: img.getAttribute("src") || "",
-        currentSrc: img.currentSrc || "",
-        alt: img.alt || "",
-        title: img.title || "",
-        width: img.naturalWidth || 0,
-        height: img.naturalHeight || 0,
-        className: img.className || ""
-      };
-    });
+    const frameBodyText = await targetFrame.locator("body").innerText().catch(() => "");
 
     const imageCandidates = await targetFrame.evaluate(() => {
       return Array.from(document.querySelectorAll("img"))
@@ -209,6 +245,7 @@ app.post("/generate", async (req, res) => {
           src: img.getAttribute("src") || "",
           currentSrc: img.currentSrc || "",
           alt: img.alt || "",
+          title: img.title || "",
           width: img.naturalWidth || 0,
           height: img.naturalHeight || 0,
           className: img.className || ""
@@ -217,22 +254,56 @@ app.post("/generate", async (req, res) => {
         .slice(0, 50);
     });
 
+    const resultImg = await targetFrame.evaluate(() => {
+      const byId = document.querySelector("#resultImgEl");
+      if (byId) {
+        return {
+          foundBy: "#resultImgEl",
+          id: byId.id || "",
+          src: byId.getAttribute("src") || "",
+          currentSrc: byId.currentSrc || "",
+          title: byId.getAttribute("title") || "",
+          width: byId.naturalWidth || 0,
+          height: byId.naturalHeight || 0
+        };
+      }
+
+      const best = Array.from(document.querySelectorAll("img")).find((img) => {
+        const src = img.getAttribute("src") || img.currentSrc || "";
+        return src && !src.startsWith("data:");
+      });
+
+      if (!best) return null;
+
+      return {
+        foundBy: "first-non-data-img",
+        id: best.id || "",
+        src: best.getAttribute("src") || "",
+        currentSrc: best.currentSrc || "",
+        title: best.getAttribute("title") || "",
+        width: best.naturalWidth || 0,
+        height: best.naturalHeight || 0
+      };
+    });
+
     await browser.close();
 
     return res.json({
       ok: true,
-      message: "Generate attempted via keyboard focus",
+      message: "Generate attempted with generic textarea strategy",
       prompt,
       titleBefore,
       urlBefore,
       titleAfter,
       urlAfter,
-      targetFrameUrl: frameUrl,
+      targetFrameUrl,
       frameDebug,
+      textareaDebug,
+      promptSetResult,
       buttonDebug,
-      activeElementDebug,
       resultImg,
-      bodyText: bodyText.slice(0, 3000),
+      bodyText: bodyText.slice(0, 2000),
+      frameBodyText: frameBodyText.slice(0, 3000),
       imageCandidates
     });
   } catch (error) {
