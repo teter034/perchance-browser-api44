@@ -7,17 +7,11 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json({ limit: "10mb" }));
 
 app.get("/", (req, res) => {
-  res.json({
-    ok: true,
-    message: "Server is running"
-  });
+  res.json({ ok: true, message: "Server is running" });
 });
 
 app.get("/health", (req, res) => {
-  res.json({
-    ok: true,
-    status: "healthy"
-  });
+  res.json({ ok: true, status: "healthy" });
 });
 
 app.post("/generate", async (req, res) => {
@@ -60,27 +54,21 @@ app.post("/generate", async (req, res) => {
       Object.defineProperty(navigator, "webdriver", {
         get: () => undefined
       });
-
       Object.defineProperty(navigator, "language", {
         get: () => "en-US"
       });
-
       Object.defineProperty(navigator, "languages", {
         get: () => ["en-US", "en"]
       });
-
       Object.defineProperty(navigator, "platform", {
         get: () => "Win32"
       });
-
       Object.defineProperty(navigator, "hardwareConcurrency", {
         get: () => 8
       });
-
       Object.defineProperty(navigator, "deviceMemory", {
         get: () => 8
       });
-
       window.chrome = { runtime: {} };
     });
 
@@ -95,54 +83,44 @@ app.post("/generate", async (req, res) => {
 
     await page.waitForTimeout(12000);
 
+    const promptBox = page.locator("textarea#input");
+    await promptBox.waitFor({ state: "visible", timeout: 60000 });
+    await promptBox.click();
+    await promptBox.fill(prompt);
+
+    const generateButton = page.getByRole("button", { name: /generate/i });
+    await generateButton.waitFor({ state: "visible", timeout: 30000 });
+    await generateButton.click();
+
+    await page.waitForTimeout(15000);
+
     const title = await page.title();
     const url = page.url();
+    const bodyText = await page.locator("body").innerText().catch(() => "");
 
-    const debugData = await page.evaluate(() => {
-      const pick = (selector) =>
-        Array.from(document.querySelectorAll(selector))
-          .slice(0, 20)
-          .map((el) => ({
-            tag: el.tagName,
-            type: el.getAttribute("type"),
-            id: el.id,
-            name: el.getAttribute("name"),
-            placeholder: el.getAttribute("placeholder"),
-            ariaLabel: el.getAttribute("aria-label"),
-            className: el.className,
-            text: (el.innerText || el.textContent || "").trim().slice(0, 120)
-          }));
-
-      return {
-        textareas: pick("textarea"),
-        inputs: pick("input"),
-        buttons: pick("button"),
-        contenteditable: pick("[contenteditable='true']"),
-        images: Array.from(document.querySelectorAll("img"))
-          .slice(0, 20)
-          .map((el) => ({
-            src: el.src,
-            alt: el.alt,
-            className: el.className
-          })),
-        links: Array.from(document.querySelectorAll("a"))
-          .slice(0, 20)
-          .map((el) => ({
-            href: el.href,
-            text: (el.innerText || el.textContent || "").trim().slice(0, 120)
-          }))
-      };
+    const imageCandidates = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll("img"))
+        .map((img) => ({
+          src: img.src,
+          alt: img.alt || "",
+          width: img.naturalWidth || 0,
+          height: img.naturalHeight || 0,
+          className: img.className || ""
+        }))
+        .filter((img) => img.src && !img.src.startsWith("data:"))
+        .slice(0, 30);
     });
 
     await browser.close();
 
     return res.json({
       ok: true,
-      message: "Debug page structure collected",
+      message: "Generate button clicked",
       prompt,
       title,
       url,
-      debugData
+      bodyText: bodyText.slice(0, 2000),
+      imageCandidates
     });
   } catch (error) {
     if (browser) {
