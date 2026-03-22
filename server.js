@@ -145,31 +145,32 @@ app.post("/generate", async (req, res) => {
           height: r.height,
           area: r.width * r.height,
           disabled: el.disabled,
+          oninput: el.getAttribute("oninput") || "",
           valuePreview: (el.value || "").slice(0, 100)
         };
       });
     });
 
-    const chosenIndex = await targetFrame.evaluate(() => {
+    const promptSetResult = await targetFrame.evaluate((promptText) => {
       const textareas = Array.from(document.querySelectorAll("textarea"));
 
       const candidates = textareas
+        .filter((el) => !el.disabled)
         .map((el, index) => {
           const r = el.getBoundingClientRect();
           const s = window.getComputedStyle(el);
           return {
             index,
+            el,
             width: r.width,
             height: r.height,
             area: r.width * r.height,
             display: s.display,
             visibility: s.visibility,
-            opacity: s.opacity,
-            disabled: el.disabled
+            opacity: s.opacity
           };
         })
         .filter((x) =>
-          !x.disabled &&
           x.display !== "none" &&
           x.visibility !== "hidden" &&
           x.opacity !== "0" &&
@@ -178,45 +179,51 @@ app.post("/generate", async (req, res) => {
         )
         .sort((a, b) => b.area - a.area);
 
-      return candidates.length ? candidates[0].index : -1;
-    });
+      const chosen = candidates[0]?.el || null;
 
-    if (chosenIndex < 0) {
-      await browser.close();
-      return res.status(500).json({
-        ok: false,
-        error: "No visible usable textarea found",
-        titleBefore,
-        urlBefore,
-        targetFrameUrl,
-        frameDebug,
-        textareaDebug
-      });
-    }
+      if (!chosen) {
+        return {
+          ok: false,
+          reason: "No visible usable textarea found",
+          candidateCount: candidates.length
+        };
+      }
 
-    const promptBox = targetFrame.locator("textarea").nth(chosenIndex);
-    await promptBox.scrollIntoViewIfNeeded().catch(() => {});
-    await promptBox.click({ timeout: 15000, force: true });
+      chosen.focus();
+      chosen.value = "";
+      chosen.dispatchEvent(new Event("input", { bubbles: true }));
+      chosen.value = promptText;
+      chosen.dispatchEvent(new Event("input", { bubbles: true }));
+      chosen.dispatchEvent(new Event("change", { bubbles: true }));
+      chosen.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true }));
 
-    await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
-    await page.keyboard.press("Backspace").catch(() => {});
-    await promptBox.fill("").catch(() => {});
-    await promptBox.type(prompt, { delay: 35 });
+      const oninputAttr = chosen.getAttribute("oninput") || "";
+      let invokedHandler = false;
+      let handlerError = null;
 
-    const promptSetResult = await promptBox.evaluate((el) => {
+      try {
+        const match = oninputAttr.match(/window\.(___inputElInputEvent\d+)/);
+        if (match && typeof window[match[1]] === "function") {
+          window[match[1]].bind(chosen)({ type: "input", target: chosen });
+          invokedHandler = true;
+        }
+      } catch (e) {
+        handlerError = String(e);
+      }
+
       return {
         ok: true,
-        chosenId: el.id || "",
-        chosenClass: el.className || "",
-        chosenPlaceholder: el.getAttribute("placeholder") || "",
-        finalValue: el.value || ""
+        chosenId: chosen.id || "",
+        chosenClass: chosen.className || "",
+        chosenPlaceholder: chosen.getAttribute("placeholder") || "",
+        finalValue: chosen.value,
+        oninputAttr,
+        invokedHandler,
+        handlerError
       };
-    });
+    }, prompt);
 
-    const generateButton = targetFrame.locator("#generateButtonEl").first();
-    await generateButton.waitFor({ state: "attached", timeout: 30000 });
-
-    const buttonDebug = await generateButton.evaluate((el) => {
+    const buttonDebug = await targetFrame.locator("#generateButtonEl").evaluate((el) => {
       const r = el.getBoundingClientRect();
       const s = window.getComputedStyle(el);
       return {
@@ -227,13 +234,46 @@ app.post("/generate", async (req, res) => {
         opacity: s.opacity,
         width: r.width,
         height: r.height,
-        disabled: el.disabled
+        disabled: el.disabled,
+        onclick: el.getAttribute("onclick") || ""
       };
     });
 
-    await generateButton.click({ force: true });
+    const generateClickResult = await targetFrame.evaluate(() => {
+      const btn = document.querySelector("#generateButtonEl");
+      if (!btn) {
+        return { ok: false, reason: "generate button not found" };
+      }
 
-    await page.waitForTimeout(30000);
+      let invokedHandler = false;
+      let handlerError = null;
+
+      try {
+        btn.click();
+
+        const onclickAttr = btn.getAttribute("onclick") || "";
+        const match = onclickAttr.match(/window\.(___generateButtonClickEvent\d+)/);
+        if (match && typeof window[match[1]] === "function") {
+          window[match[1]]({ type: "click", target: btn });
+          invokedHandler = true;
+        }
+
+        return {
+          ok: true,
+          onclickAttr,
+          invokedHandler,
+          handlerError
+        };
+      } catch (e) {
+        handlerError = String(e);
+        return {
+          ok: false,
+          reason: handlerError
+        };
+      }
+    });
+
+    await page.waitForTimeout(35000);
 
     const titleAfter = await page.title();
     const urlAfter = page.url();
@@ -292,7 +332,7 @@ app.post("/generate", async (req, res) => {
 
     return res.json({
       ok: true,
-      message: "Generate attempted with typed input strategy",
+      message: "Generate attempted with direct handler strategy",
       prompt,
       titleBefore,
       urlBefore,
@@ -301,9 +341,9 @@ app.post("/generate", async (req, res) => {
       targetFrameUrl,
       frameDebug,
       textareaDebug,
-      chosenIndex,
       promptSetResult,
       buttonDebug,
+      generateClickResult,
       resultImg,
       bodyText: bodyText.slice(0, 2000),
       frameBodyText: frameBodyText.slice(0, 3000),
