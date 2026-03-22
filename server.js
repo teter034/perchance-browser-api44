@@ -45,7 +45,12 @@ app.post("/generate", async (req, res) => {
       timeout: 120000
     });
 
+    await page.waitForTimeout(5000);
+
     const title = await page.title();
+    const url = page.url();
+    const bodyText = await page.locator("body").innerText().catch(() => "");
+    const html = await page.content();
 
     await browser.close();
 
@@ -53,7 +58,10 @@ app.post("/generate", async (req, res) => {
       ok: true,
       message: "Browser opened page successfully",
       prompt,
-      title
+      title,
+      url,
+      bodyText: bodyText.slice(0, 2000),
+      htmlSnippet: html.slice(0, 2000)
     });
   } catch (error) {
     if (browser) {
