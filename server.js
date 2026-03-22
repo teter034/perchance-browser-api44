@@ -1,3 +1,19 @@
+import express from "express";
+import { chromium } from "playwright";
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(express.json({ limit: "10mb" }));
+
+app.get("/", (req, res) => {
+  res.json({ ok: true, message: "Server is running" });
+});
+
+app.get("/health", (req, res) => {
+  res.json({ ok: true, status: "healthy" });
+});
+
 app.post("/generate", async (req, res) => {
   const { prompt } = req.body || {};
 
@@ -74,18 +90,16 @@ app.post("/generate", async (req, res) => {
     const visibleButtons = await page.locator("button:visible").count();
 
     const promptBox = page.locator("textarea:visible").first();
-    await promptBox.waitFor({ state: "visible", timeout: 30000 });
-    await promptBox.click();
+    await promptBox.click({ timeout: 15000 });
     await promptBox.fill("");
-    await promptBox.type(prompt, { delay: 30 });
+    await promptBox.type(prompt, { delay: 30, timeout: 30000 });
 
     const generateButton = page
       .locator("button:visible")
       .filter({ hasText: /generate/i })
       .first();
 
-    await generateButton.waitFor({ state: "visible", timeout: 30000 });
-    await generateButton.click();
+    await generateButton.click({ timeout: 15000 });
 
     await page.waitForTimeout(15000);
 
@@ -118,13 +132,19 @@ app.post("/generate", async (req, res) => {
       imageCandidates
     });
   } catch (error) {
-    if (browser) {
-      await browser.close().catch(() => {});
-    }
+    const safeError = error instanceof Error ? error.stack || error.message : String(error);
+
+    try {
+      if (browser) await browser.close();
+    } catch {}
 
     return res.status(500).json({
       ok: false,
-      error: String(error)
+      error: safeError
     });
   }
+});
+
+app.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
 });
