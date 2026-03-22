@@ -54,21 +54,27 @@ app.post("/generate", async (req, res) => {
       Object.defineProperty(navigator, "webdriver", {
         get: () => undefined
       });
+
       Object.defineProperty(navigator, "language", {
         get: () => "en-US"
       });
+
       Object.defineProperty(navigator, "languages", {
         get: () => ["en-US", "en"]
       });
+
       Object.defineProperty(navigator, "platform", {
         get: () => "Win32"
       });
+
       Object.defineProperty(navigator, "hardwareConcurrency", {
         get: () => 8
       });
+
       Object.defineProperty(navigator, "deviceMemory", {
         get: () => 8
       });
+
       window.chrome = { runtime: {} };
     });
 
@@ -86,20 +92,122 @@ app.post("/generate", async (req, res) => {
     const title = await page.title();
     const url = page.url();
 
-    const visibleTextareas = await page.locator("textarea:visible").count();
-    const visibleButtons = await page.locator("button:visible").count();
+    const visibleTextareas = await page.locator("textarea").evaluateAll((els) => {
+      return els.map((el, i) => {
+        const r = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return {
+          index: i,
+          id: el.id,
+          placeholder: el.getAttribute("placeholder"),
+          display: style.display,
+          visibility: style.visibility,
+          opacity: style.opacity,
+          width: r.width,
+          height: r.height,
+          disabled: el.disabled
+        };
+      });
+    });
 
-    const promptBox = page.locator("textarea:visible").first();
-    await promptBox.click({ timeout: 15000 });
-    await promptBox.fill("");
-    await promptBox.type(prompt, { delay: 30, timeout: 30000 });
+    const promptSetResult = await page.evaluate((promptText) => {
+      const textareas = Array.from(document.querySelectorAll("textarea"));
 
-    const generateButton = page
-      .locator("button:visible")
-      .filter({ hasText: /generate/i })
-      .first();
+      const candidate = textareas.find((el) => {
+        const r = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
 
-    await generateButton.click({ timeout: 15000 });
+        return (
+          r.width > 100 &&
+          r.height > 20 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          style.opacity !== "0" &&
+          !el.disabled
+        );
+      });
+
+      if (!candidate) {
+        return { ok: false, reason: "No suitable textarea found" };
+      }
+
+      candidate.focus();
+      candidate.value = promptText;
+      candidate.dispatchEvent(new Event("input", { bubbles: true }));
+      candidate.dispatchEvent(new Event("change", { bubbles: true }));
+
+      return {
+        ok: true,
+        id: candidate.id,
+        placeholder: candidate.getAttribute("placeholder")
+      };
+    }, prompt);
+
+    if (!promptSetResult.ok) {
+      throw new Error(
+        `Prompt set failed: ${JSON.stringify({
+          promptSetResult,
+          visibleTextareas
+        })}`
+      );
+    }
+
+    const visibleButtonsDebug = await page.locator("button").evaluateAll((els) => {
+      return els.map((el, i) => {
+        const r = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return {
+          index: i,
+          text: (el.innerText || el.textContent || "").trim(),
+          display: style.display,
+          visibility: style.visibility,
+          opacity: style.opacity,
+          width: r.width,
+          height: r.height,
+          disabled: el.disabled
+        };
+      });
+    });
+
+    const generateClicked = await page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll("button"));
+
+      const btn = buttons.find((el) => {
+        const txt = (el.innerText || el.textContent || "").trim().toLowerCase();
+        const r = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+
+        return (
+          txt.includes("generate") &&
+          r.width > 20 &&
+          r.height > 20 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          style.opacity !== "0" &&
+          !el.disabled
+        );
+      });
+
+      if (!btn) {
+        return { ok: false, reason: "Generate button not found" };
+      }
+
+      btn.click();
+
+      return {
+        ok: true,
+        text: (btn.innerText || btn.textContent || "").trim()
+      };
+    });
+
+    if (!generateClicked.ok) {
+      throw new Error(
+        `Generate click failed: ${JSON.stringify({
+          generateClicked,
+          visibleButtonsDebug
+        })}`
+      );
+    }
 
     await page.waitForTimeout(15000);
 
@@ -126,13 +234,16 @@ app.post("/generate", async (req, res) => {
       prompt,
       title,
       url,
+      promptSetResult,
+      generateClicked,
       visibleTextareas,
-      visibleButtons,
+      visibleButtonsDebug,
       bodyText: bodyText.slice(0, 2000),
       imageCandidates
     });
   } catch (error) {
-    const safeError = error instanceof Error ? error.stack || error.message : String(error);
+    const safeError =
+      error instanceof Error ? error.stack || error.message : String(error);
 
     try {
       if (browser) await browser.close();
