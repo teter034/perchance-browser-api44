@@ -143,6 +143,7 @@ app.post("/generate", async (req, res) => {
           opacity: s.opacity,
           width: r.width,
           height: r.height,
+          area: r.width * r.height,
           disabled: el.disabled,
           valuePreview: (el.value || "").slice(0, 80)
         };
@@ -156,39 +157,49 @@ app.post("/generate", async (req, res) => {
         return { ok: false, reason: "No textarea elements found" };
       }
 
-      let chosen = null;
+      const candidates = textareas
+        .filter((el) => !el.disabled)
+        .map((el, index) => {
+          const r = el.getBoundingClientRect();
+          const s = window.getComputedStyle(el);
+          return {
+            index,
+            el,
+            width: r.width,
+            height: r.height,
+            area: r.width * r.height,
+            display: s.display,
+            visibility: s.visibility,
+            opacity: s.opacity,
+            placeholder: el.getAttribute("placeholder") || "",
+            className: el.className || ""
+          };
+        })
+        .filter((x) =>
+          x.display !== "none" &&
+          x.visibility !== "hidden" &&
+          x.opacity !== "0" &&
+          x.width > 50 &&
+          x.height > 20
+        )
+        .sort((a, b) => b.area - a.area);
 
-      for (const el of textareas) {
-        if (el.disabled) continue;
-
-        const placeholder = (el.getAttribute("placeholder") || "").toLowerCase();
-        const cls = (el.className || "").toLowerCase();
-        const id = (el.id || "").toLowerCase();
-
-        if (
-          placeholder.includes("woman") ||
-          placeholder.includes("tai chi") ||
-          cls.includes("paragraph-input") ||
-          id === "input"
-        ) {
-          chosen = el;
-          break;
-        }
-      }
+      const chosen = candidates[0]?.el || null;
 
       if (!chosen) {
-        chosen = textareas.find((el) => !el.disabled) || null;
-      }
-
-      if (!chosen) {
-        return { ok: false, reason: "No enabled textarea found" };
+        return {
+          ok: false,
+          reason: "No visible usable textarea found",
+          candidateCount: candidates.length
+        };
       }
 
       chosen.focus();
+      chosen.value = "";
+      chosen.dispatchEvent(new Event("input", { bubbles: true }));
       chosen.value = promptText;
       chosen.dispatchEvent(new Event("input", { bubbles: true }));
       chosen.dispatchEvent(new Event("change", { bubbles: true }));
-      chosen.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true }));
 
       return {
         ok: true,
@@ -230,12 +241,11 @@ app.post("/generate", async (req, res) => {
 
     await targetFrame.locator("#generateButtonEl").evaluate((el) => el.click());
 
-    await page.waitForTimeout(25000);
+    await page.waitForTimeout(30000);
 
     const titleAfter = await page.title();
     const urlAfter = page.url();
     const bodyText = await page.locator("body").innerText().catch(() => "");
-
     const frameBodyText = await targetFrame.locator("body").innerText().catch(() => "");
 
     const imageCandidates = await targetFrame.evaluate(() => {
@@ -290,7 +300,7 @@ app.post("/generate", async (req, res) => {
 
     return res.json({
       ok: true,
-      message: "Generate attempted with generic textarea strategy",
+      message: "Generate attempted with largest visible textarea strategy",
       prompt,
       titleBefore,
       urlBefore,
