@@ -4,7 +4,7 @@ import { chromium } from "playwright";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "20mb" }));
 
 app.get("/", (req, res) => {
   res.json({ ok: true, message: "Server is running" });
@@ -39,7 +39,7 @@ app.post("/generate", async (req, res) => {
     const context = await browser.newContext({
       userAgent:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-      viewport: { width: 1366, height: 768 },
+      viewport: { width: 1366, height: 900 },
       locale: "en-US",
       timezoneId: "America/New_York",
       colorScheme: "light",
@@ -61,13 +61,13 @@ app.post("/generate", async (req, res) => {
         url.includes("perchance") ||
         url.includes("image") ||
         url.includes("generate") ||
+        url.includes("embed") ||
         url.includes("api")
       ) {
         requestLog.push({
           method: request.method(),
           url,
-          resourceType: request.resourceType(),
-          postData: request.postData()?.slice(0, 1000) || null
+          resourceType: request.resourceType()
         });
       }
     });
@@ -78,6 +78,7 @@ app.post("/generate", async (req, res) => {
         url.includes("perchance") ||
         url.includes("image") ||
         url.includes("generate") ||
+        url.includes("embed") ||
         url.includes("api")
       ) {
         responseLog.push({
@@ -173,12 +174,15 @@ app.post("/generate", async (req, res) => {
       });
     }
 
+    const targetFrameUrl = targetFrame.url();
+
     const textareaDebug = await targetFrame.locator("textarea").evaluateAll((els) => {
       return els.map((el, i) => {
         const r = el.getBoundingClientRect();
         const s = window.getComputedStyle(el);
         return {
           index: i,
+          id: el.id || "",
           className: el.className || "",
           placeholder: el.getAttribute("placeholder") || "",
           width: r.width,
@@ -187,7 +191,9 @@ app.post("/generate", async (req, res) => {
           display: s.display,
           visibility: s.visibility,
           opacity: s.opacity,
-          disabled: el.disabled
+          disabled: el.disabled,
+          oninput: el.getAttribute("oninput") || "",
+          valuePreview: (el.value || "").slice(0, 100)
         };
       });
     });
@@ -227,8 +233,9 @@ app.post("/generate", async (req, res) => {
       return res.status(500).json({
         ok: false,
         error: "No visible usable textarea found",
-        textareaDebug,
-        frameDebug
+        targetFrameUrl,
+        frameDebug,
+        textareaDebug
       });
     }
 
@@ -267,6 +274,22 @@ app.post("/generate", async (req, res) => {
 
     const generateButton = targetFrame.locator("#generateButtonEl").first();
 
+    const buttonDebug = await generateButton.evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return {
+        id: el.id,
+        text: (el.innerText || el.textContent || "").trim(),
+        display: s.display,
+        visibility: s.visibility,
+        opacity: s.opacity,
+        width: r.width,
+        height: r.height,
+        disabled: el.disabled,
+        onclick: el.getAttribute("onclick") || ""
+      };
+    });
+
     const generateClickResult = await generateButton.evaluate((el) => {
       const onclickAttr = el.getAttribute("onclick") || "";
       let invokedHandler = false;
@@ -274,6 +297,7 @@ app.post("/generate", async (req, res) => {
 
       try {
         el.click();
+
         const match = onclickAttr.match(/window\.(___generateButtonClickEvent\d+)/);
         if (match && typeof window[match[1]] === "function") {
           window[match[1]]({ type: "click", target: el });
@@ -290,9 +314,78 @@ app.post("/generate", async (req, res) => {
       };
     });
 
-    await page.waitForTimeout(40000);
+    // РОВНО ОДНО ОЖИДАНИЕ 50 СЕКУНД
+    await page.waitForTimeout(50000);
 
     const frameBodyText = await targetFrame.locator("body").innerText().catch(() => "");
+
+    const foundResult = await targetFrame.evaluate(() => {
+      const byId = document.querySelector("#resultImgEl");
+      if (byId) {
+        const src = byId.getAttribute("src") || byId.currentSrc || "";
+        return {
+          found: !!src,
+          kind: "resultImgEl",
+          src,
+          width: byId.naturalWidth || 0,
+          height: byId.naturalHeight || 0
+        };
+      }
+
+      const img = Array.from(document.querySelectorAll("img")).find((el) => {
+        const src = el.getAttribute("src") || el.currentSrc || "";
+        return src && !src.startsWith("data:");
+      });
+      if (img) {
+        return {
+          found: true,
+          kind: "img",
+          src: img.getAttribute("src") || img.currentSrc || "",
+          width: img.naturalWidth || 0,
+          height: img.naturalHeight || 0
+        };
+      }
+
+      const canvas = Array.from(document.querySelectorAll("canvas")).find((el) => {
+        return (el.width || 0) > 128 && (el.height || 0) > 128;
+      });
+      if (canvas) {
+        return {
+          found: true,
+          kind: "canvas",
+          width: canvas.width || 0,
+          height: canvas.height || 0,
+          dataUrl: canvas.toDataURL("image/png").slice(0, 1000)
+        };
+      }
+
+      const bg = Array.from(document.querySelectorAll("*"))
+        .map((el) => {
+          const style = window.getComputedStyle(el);
+          const backgroundImage = style.backgroundImage || "";
+          const r = el.getBoundingClientRect();
+          return {
+            backgroundImage,
+            width: r.width,
+            height: r.height,
+            className: el.className || ""
+          };
+        })
+        .find((x) => x.backgroundImage && x.backgroundImage !== "none" && x.width > 100 && x.height > 100);
+
+      if (bg) {
+        return {
+          found: true,
+          kind: "background-image",
+          backgroundImage: bg.backgroundImage,
+          width: bg.width,
+          height: bg.height,
+          className: bg.className
+        };
+      }
+
+      return { found: false };
+    });
 
     const imageCandidates = await targetFrame.evaluate(() => {
       const imgs = Array.from(document.querySelectorAll("img")).map((img) => ({
@@ -336,25 +429,35 @@ app.post("/generate", async (req, res) => {
       };
     });
 
+    const screenshotBuffer = await page.screenshot({
+      type: "jpeg",
+      quality: 50,
+      fullPage: true
+    });
+
     await browser.close();
 
     return res.json({
       ok: true,
-      message: "Generate attempted with network diagnostics",
+      message: "Generate attempted with single 50s wait",
       prompt,
       titleBefore,
       urlBefore,
+      targetFrameUrl,
       frameDebug,
       textareaDebug,
       chosenIndex,
       promptSetResult,
+      buttonDebug,
       generateClickResult,
+      foundResult,
       frameBodyText: frameBodyText.slice(0, 4000),
-      requestLog: requestLog.slice(-50),
-      responseLog: responseLog.slice(-50),
-      consoleLog: consoleLog.slice(-50),
-      pageErrors: pageErrors.slice(-20),
-      imageCandidates
+      requestLog: requestLog.slice(-80),
+      responseLog: responseLog.slice(-80),
+      consoleLog: consoleLog.slice(-80),
+      pageErrors: pageErrors.slice(-30),
+      imageCandidates,
+      screenshotBase64: screenshotBuffer.toString("base64")
     });
   } catch (error) {
     const safeError =
