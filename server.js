@@ -50,6 +50,55 @@ app.post("/generate", async (req, res) => {
 
     const page = await context.newPage();
 
+    const requestLog = [];
+    const responseLog = [];
+    const consoleLog = [];
+    const pageErrors = [];
+
+    page.on("request", (request) => {
+      const url = request.url();
+      if (
+        url.includes("perchance") ||
+        url.includes("image") ||
+        url.includes("generate") ||
+        url.includes("api")
+      ) {
+        requestLog.push({
+          method: request.method(),
+          url,
+          resourceType: request.resourceType(),
+          postData: request.postData()?.slice(0, 1000) || null
+        });
+      }
+    });
+
+    page.on("response", async (response) => {
+      const url = response.url();
+      if (
+        url.includes("perchance") ||
+        url.includes("image") ||
+        url.includes("generate") ||
+        url.includes("api")
+      ) {
+        responseLog.push({
+          url,
+          status: response.status(),
+          contentType: response.headers()["content-type"] || ""
+        });
+      }
+    });
+
+    page.on("console", (msg) => {
+      consoleLog.push({
+        type: msg.type(),
+        text: msg.text()
+      });
+    });
+
+    page.on("pageerror", (err) => {
+      pageErrors.push(String(err));
+    });
+
     await page.addInitScript(() => {
       Object.defineProperty(navigator, "webdriver", {
         get: () => undefined
@@ -86,8 +135,8 @@ app.post("/generate", async (req, res) => {
     const titleBefore = await page.title();
     const urlBefore = page.url();
 
-    const frameDebug = [];
     let targetFrame = null;
+    const frameDebug = [];
 
     for (const frame of page.frames()) {
       try {
@@ -114,20 +163,15 @@ app.post("/generate", async (req, res) => {
     }
 
     if (!targetFrame) {
-      const bodyText = await page.locator("body").innerText().catch(() => "");
       await browser.close();
-
       return res.status(500).json({
         ok: false,
         error: "Target frame with generate button not found",
         titleBefore,
         urlBefore,
-        frameDebug,
-        bodyText: bodyText.slice(0, 2000)
+        frameDebug
       });
     }
-
-    const targetFrameUrl = targetFrame.url();
 
     const textareaDebug = await targetFrame.locator("textarea").evaluateAll((els) => {
       return els.map((el, i) => {
@@ -135,42 +179,38 @@ app.post("/generate", async (req, res) => {
         const s = window.getComputedStyle(el);
         return {
           index: i,
-          id: el.id || "",
           className: el.className || "",
           placeholder: el.getAttribute("placeholder") || "",
-          display: s.display,
-          visibility: s.visibility,
-          opacity: s.opacity,
           width: r.width,
           height: r.height,
           area: r.width * r.height,
-          disabled: el.disabled,
-          oninput: el.getAttribute("oninput") || "",
-          valuePreview: (el.value || "").slice(0, 100)
+          display: s.display,
+          visibility: s.visibility,
+          opacity: s.opacity,
+          disabled: el.disabled
         };
       });
     });
 
-    const promptSetResult = await targetFrame.evaluate((promptText) => {
+    const chosenIndex = await targetFrame.evaluate(() => {
       const textareas = Array.from(document.querySelectorAll("textarea"));
-
       const candidates = textareas
-        .filter((el) => !el.disabled)
         .map((el, index) => {
           const r = el.getBoundingClientRect();
           const s = window.getComputedStyle(el);
           return {
             index,
-            el,
             width: r.width,
             height: r.height,
             area: r.width * r.height,
             display: s.display,
             visibility: s.visibility,
-            opacity: s.opacity
+            opacity: s.opacity,
+            disabled: el.disabled
           };
         })
         .filter((x) =>
+          !x.disabled &&
           x.display !== "none" &&
           x.visibility !== "hidden" &&
           x.opacity !== "0" &&
@@ -179,32 +219,36 @@ app.post("/generate", async (req, res) => {
         )
         .sort((a, b) => b.area - a.area);
 
-      const chosen = candidates[0]?.el || null;
+      return candidates.length ? candidates[0].index : -1;
+    });
 
-      if (!chosen) {
-        return {
-          ok: false,
-          reason: "No visible usable textarea found",
-          candidateCount: candidates.length
-        };
-      }
+    if (chosenIndex < 0) {
+      await browser.close();
+      return res.status(500).json({
+        ok: false,
+        error: "No visible usable textarea found",
+        textareaDebug,
+        frameDebug
+      });
+    }
 
-      chosen.focus();
-      chosen.value = "";
-      chosen.dispatchEvent(new Event("input", { bubbles: true }));
-      chosen.value = promptText;
-      chosen.dispatchEvent(new Event("input", { bubbles: true }));
-      chosen.dispatchEvent(new Event("change", { bubbles: true }));
-      chosen.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true }));
+    const promptBox = targetFrame.locator("textarea").nth(chosenIndex);
+    await promptBox.scrollIntoViewIfNeeded().catch(() => {});
+    await promptBox.click({ timeout: 15000, force: true });
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
+    await page.keyboard.press("Backspace").catch(() => {});
+    await promptBox.fill("").catch(() => {});
+    await promptBox.type(prompt, { delay: 35 });
 
-      const oninputAttr = chosen.getAttribute("oninput") || "";
+    const promptSetResult = await promptBox.evaluate((el) => {
+      const oninputAttr = el.getAttribute("oninput") || "";
       let invokedHandler = false;
       let handlerError = null;
 
       try {
         const match = oninputAttr.match(/window\.(___inputElInputEvent\d+)/);
         if (match && typeof window[match[1]] === "function") {
-          window[match[1]].bind(chosen)({ type: "input", target: chosen });
+          window[match[1]].bind(el)({ type: "input", target: el });
           invokedHandler = true;
         }
       } catch (e) {
@@ -212,141 +256,104 @@ app.post("/generate", async (req, res) => {
       }
 
       return {
-        ok: true,
-        chosenId: chosen.id || "",
-        chosenClass: chosen.className || "",
-        chosenPlaceholder: chosen.getAttribute("placeholder") || "",
-        finalValue: chosen.value,
+        finalValue: el.value || "",
+        chosenClass: el.className || "",
+        chosenPlaceholder: el.getAttribute("placeholder") || "",
         oninputAttr,
         invokedHandler,
         handlerError
       };
-    }, prompt);
-
-    const buttonDebug = await targetFrame.locator("#generateButtonEl").evaluate((el) => {
-      const r = el.getBoundingClientRect();
-      const s = window.getComputedStyle(el);
-      return {
-        id: el.id,
-        text: (el.innerText || el.textContent || "").trim(),
-        display: s.display,
-        visibility: s.visibility,
-        opacity: s.opacity,
-        width: r.width,
-        height: r.height,
-        disabled: el.disabled,
-        onclick: el.getAttribute("onclick") || ""
-      };
     });
 
-    const generateClickResult = await targetFrame.evaluate(() => {
-      const btn = document.querySelector("#generateButtonEl");
-      if (!btn) {
-        return { ok: false, reason: "generate button not found" };
-      }
+    const generateButton = targetFrame.locator("#generateButtonEl").first();
 
+    const generateClickResult = await generateButton.evaluate((el) => {
+      const onclickAttr = el.getAttribute("onclick") || "";
       let invokedHandler = false;
       let handlerError = null;
 
       try {
-        btn.click();
-
-        const onclickAttr = btn.getAttribute("onclick") || "";
+        el.click();
         const match = onclickAttr.match(/window\.(___generateButtonClickEvent\d+)/);
         if (match && typeof window[match[1]] === "function") {
-          window[match[1]]({ type: "click", target: btn });
+          window[match[1]]({ type: "click", target: el });
           invokedHandler = true;
         }
-
-        return {
-          ok: true,
-          onclickAttr,
-          invokedHandler,
-          handlerError
-        };
       } catch (e) {
         handlerError = String(e);
-        return {
-          ok: false,
-          reason: handlerError
-        };
       }
-    });
-
-    await page.waitForTimeout(35000);
-
-    const titleAfter = await page.title();
-    const urlAfter = page.url();
-    const bodyText = await page.locator("body").innerText().catch(() => "");
-    const frameBodyText = await targetFrame.locator("body").innerText().catch(() => "");
-
-    const resultImg = await targetFrame.evaluate(() => {
-      const byId = document.querySelector("#resultImgEl");
-      if (byId) {
-        return {
-          foundBy: "#resultImgEl",
-          id: byId.id || "",
-          src: byId.getAttribute("src") || "",
-          currentSrc: byId.currentSrc || "",
-          title: byId.getAttribute("title") || "",
-          width: byId.naturalWidth || 0,
-          height: byId.naturalHeight || 0
-        };
-      }
-
-      const best = Array.from(document.querySelectorAll("img")).find((img) => {
-        const src = img.getAttribute("src") || img.currentSrc || "";
-        return src && !src.startsWith("data:");
-      });
-
-      if (!best) return null;
 
       return {
-        foundBy: "first-non-data-img",
-        id: best.id || "",
-        src: best.getAttribute("src") || "",
-        currentSrc: best.currentSrc || "",
-        title: best.getAttribute("title") || "",
-        width: best.naturalWidth || 0,
-        height: best.naturalHeight || 0
+        onclickAttr,
+        invokedHandler,
+        handlerError
       };
     });
 
+    await page.waitForTimeout(40000);
+
+    const frameBodyText = await targetFrame.locator("body").innerText().catch(() => "");
+
     const imageCandidates = await targetFrame.evaluate(() => {
-      return Array.from(document.querySelectorAll("img"))
-        .map((img) => ({
-          id: img.id || "",
-          src: img.getAttribute("src") || "",
-          currentSrc: img.currentSrc || "",
-          alt: img.alt || "",
-          title: img.title || "",
-          width: img.naturalWidth || 0,
-          height: img.naturalHeight || 0,
-          className: img.className || ""
-        }))
-        .filter((img) => img.src || img.currentSrc)
-        .slice(0, 50);
+      const imgs = Array.from(document.querySelectorAll("img")).map((img) => ({
+        tag: "img",
+        id: img.id || "",
+        src: img.getAttribute("src") || "",
+        currentSrc: img.currentSrc || "",
+        className: img.className || "",
+        width: img.naturalWidth || 0,
+        height: img.naturalHeight || 0
+      }));
+
+      const canvases = Array.from(document.querySelectorAll("canvas")).map((el, i) => ({
+        tag: "canvas",
+        index: i,
+        width: el.width || 0,
+        height: el.height || 0,
+        className: el.className || ""
+      }));
+
+      const bgCandidates = Array.from(document.querySelectorAll("*"))
+        .map((el) => {
+          const style = window.getComputedStyle(el);
+          const bg = style.backgroundImage || "";
+          const r = el.getBoundingClientRect();
+          return {
+            tag: el.tagName,
+            className: el.className || "",
+            backgroundImage: bg,
+            width: r.width,
+            height: r.height
+          };
+        })
+        .filter((x) => x.backgroundImage && x.backgroundImage !== "none")
+        .slice(0, 20);
+
+      return {
+        imgs: imgs.slice(0, 50),
+        canvases: canvases.slice(0, 20),
+        bgCandidates
+      };
     });
 
     await browser.close();
 
     return res.json({
       ok: true,
-      message: "Generate attempted with direct handler strategy",
+      message: "Generate attempted with network diagnostics",
       prompt,
       titleBefore,
       urlBefore,
-      titleAfter,
-      urlAfter,
-      targetFrameUrl,
       frameDebug,
       textareaDebug,
+      chosenIndex,
       promptSetResult,
-      buttonDebug,
       generateClickResult,
-      resultImg,
-      bodyText: bodyText.slice(0, 2000),
-      frameBodyText: frameBodyText.slice(0, 3000),
+      frameBodyText: frameBodyText.slice(0, 4000),
+      requestLog: requestLog.slice(-50),
+      responseLog: responseLog.slice(-50),
+      consoleLog: consoleLog.slice(-50),
+      pageErrors: pageErrors.slice(-20),
       imageCandidates
     });
   } catch (error) {
