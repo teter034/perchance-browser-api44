@@ -91,19 +91,17 @@ app.post("/generate", async (req, res) => {
 
     for (const frame of page.frames()) {
       try {
-        const textareaCount = await frame.locator("textarea.paragraph-input").count();
         const buttonCount = await frame.locator("#generateButtonEl").count();
-        const genericTextareaCount = await frame.locator("textarea").count();
+        const textareaCount = await frame.locator("textarea").count();
 
         frameDebug.push({
           url: frame.url(),
           name: frame.name(),
-          textareaCount,
           buttonCount,
-          genericTextareaCount
+          textareaCount
         });
 
-        if ((textareaCount > 0 || genericTextareaCount > 0) && buttonCount > 0) {
+        if (buttonCount > 0) {
           targetFrame = frame;
         }
       } catch (e) {
@@ -117,58 +115,22 @@ app.post("/generate", async (req, res) => {
 
     if (!targetFrame) {
       const bodyText = await page.locator("body").innerText().catch(() => "");
-      const htmlSnippet = (await page.content()).slice(0, 3000);
-
       await browser.close();
 
       return res.status(500).json({
         ok: false,
-        error: "Target frame not found",
+        error: "Target frame with generate button not found",
         titleBefore,
         urlBefore,
         frameDebug,
-        bodyText: bodyText.slice(0, 2000),
-        htmlSnippet
-      });
-    }
-
-    const promptBox = targetFrame.locator("textarea.paragraph-input").first();
-    const generateButton = targetFrame.locator("#generateButtonEl").first();
-
-    const promptExists = await promptBox.count();
-    const buttonExists = await generateButton.count();
-
-    if (!promptExists || !buttonExists) {
-      const bodyText = await page.locator("body").innerText().catch(() => "");
-
-      await browser.close();
-
-      return res.status(500).json({
-        ok: false,
-        error: "Prompt textarea or generate button missing in selected frame",
-        titleBefore,
-        urlBefore,
-        frameDebug,
-        promptExists,
-        buttonExists,
         bodyText: bodyText.slice(0, 2000)
       });
     }
 
-    const promptDebug = await promptBox.evaluate((el) => {
-      const r = el.getBoundingClientRect();
-      const s = window.getComputedStyle(el);
-      return {
-        className: el.className,
-        placeholder: el.getAttribute("placeholder"),
-        display: s.display,
-        visibility: s.visibility,
-        opacity: s.opacity,
-        width: r.width,
-        height: r.height,
-        disabled: el.disabled
-      };
-    });
+    const frameUrl = targetFrame.url();
+
+    const generateButton = targetFrame.locator("#generateButtonEl").first();
+    await generateButton.waitFor({ state: "attached", timeout: 30000 });
 
     const buttonDebug = await generateButton.evaluate((el) => {
       const r = el.getBoundingClientRect();
@@ -185,63 +147,90 @@ app.post("/generate", async (req, res) => {
       };
     });
 
-    await promptBox.evaluate((el, value) => {
-      el.focus();
-      el.value = value;
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-    }, prompt);
+    const frameBody = targetFrame.locator("body").first();
+    await frameBody.click({ position: { x: 200, y: 200 }, timeout: 15000 }).catch(() => {});
+
+    for (let i = 0; i < 6; i++) {
+      await page.keyboard.press("Tab");
+      await page.waitForTimeout(300);
+    }
+
+    await page.keyboard.type(prompt, { delay: 40 });
+    await page.waitForTimeout(1000);
+
+    const activeElementDebug = await targetFrame.evaluate(() => {
+      const el = document.activeElement;
+      if (!el) return null;
+
+      const r = el.getBoundingClientRect();
+      return {
+        tag: el.tagName,
+        id: el.id || "",
+        className: el.className || "",
+        placeholder: el.getAttribute?.("placeholder") || "",
+        text: (el.innerText || el.textContent || "").trim().slice(0, 200),
+        width: r.width,
+        height: r.height
+      };
+    });
 
     await generateButton.evaluate((el) => el.click());
 
-    await page.waitForTimeout(20000);
+    await page.waitForTimeout(25000);
 
     const titleAfter = await page.title();
     const urlAfter = page.url();
     const bodyText = await page.locator("body").innerText().catch(() => "");
 
-    const imageCandidates = await page.evaluate(() => {
-      return Array.from(document.querySelectorAll("img"))
-        .map((img) => ({
-          id: img.id || "",
-          src: img.src || "",
-          alt: img.alt || "",
-          width: img.naturalWidth || 0,
-          height: img.naturalHeight || 0,
-          className: img.className || "",
-          title: img.title || ""
-        }))
-        .filter((img) => img.src)
-        .slice(0, 50);
-    });
+    const resultImg = await targetFrame.evaluate(() => {
+      const img =
+        document.querySelector("#resultImgEl") ||
+        document.querySelector("img[src*='image-generation']") ||
+        document.querySelector("img");
 
-    const resultImg = await page.evaluate(() => {
-      const img = document.querySelector("#resultImgEl");
       if (!img) return null;
 
       return {
         id: img.id || "",
         src: img.getAttribute("src") || "",
-        title: img.getAttribute("title") || "",
+        currentSrc: img.currentSrc || "",
+        alt: img.alt || "",
+        title: img.title || "",
         width: img.naturalWidth || 0,
-        height: img.naturalHeight || 0
+        height: img.naturalHeight || 0,
+        className: img.className || ""
       };
+    });
+
+    const imageCandidates = await targetFrame.evaluate(() => {
+      return Array.from(document.querySelectorAll("img"))
+        .map((img) => ({
+          id: img.id || "",
+          src: img.getAttribute("src") || "",
+          currentSrc: img.currentSrc || "",
+          alt: img.alt || "",
+          width: img.naturalWidth || 0,
+          height: img.naturalHeight || 0,
+          className: img.className || ""
+        }))
+        .filter((img) => img.src || img.currentSrc)
+        .slice(0, 50);
     });
 
     await browser.close();
 
     return res.json({
       ok: true,
-      message: "Generate attempted",
+      message: "Generate attempted via keyboard focus",
       prompt,
       titleBefore,
       urlBefore,
       titleAfter,
       urlAfter,
-      targetFrameUrl: targetFrame.url(),
+      targetFrameUrl: frameUrl,
       frameDebug,
-      promptDebug,
       buttonDebug,
+      activeElementDebug,
       resultImg,
       bodyText: bodyText.slice(0, 3000),
       imageCandidates
