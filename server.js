@@ -35,17 +35,67 @@ app.post("/generate", async (req, res) => {
   try {
     browser = await chromium.launch({
       headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"]
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-blink-features=AutomationControlled"
+      ]
     });
 
-    const page = await browser.newPage();
+    const context = await browser.newContext({
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+      viewport: { width: 1366, height: 768 },
+      locale: "en-US",
+      timezoneId: "America/New_York",
+      colorScheme: "light",
+      deviceScaleFactor: 1,
+      hasTouch: false,
+      isMobile: false
+    });
+
+    const page = await context.newPage();
+
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "webdriver", {
+        get: () => undefined
+      });
+
+      Object.defineProperty(navigator, "language", {
+        get: () => "en-US"
+      });
+
+      Object.defineProperty(navigator, "languages", {
+        get: () => ["en-US", "en"]
+      });
+
+      Object.defineProperty(navigator, "platform", {
+        get: () => "Win32"
+      });
+
+      Object.defineProperty(navigator, "hardwareConcurrency", {
+        get: () => 8
+      });
+
+      Object.defineProperty(navigator, "deviceMemory", {
+        get: () => 8
+      });
+
+      window.chrome = {
+        runtime: {}
+      };
+    });
+
+    await page.setExtraHTTPHeaders({
+      "accept-language": "en-US,en;q=0.9"
+    });
 
     await page.goto("https://perchance.org/ai-text-to-image-generator", {
       waitUntil: "domcontentloaded",
       timeout: 120000
     });
 
-    await page.waitForTimeout(5000);
+    await page.waitForTimeout(12000);
 
     const title = await page.title();
     const url = page.url();
@@ -60,8 +110,8 @@ app.post("/generate", async (req, res) => {
       prompt,
       title,
       url,
-      bodyText: bodyText.slice(0, 2000),
-      htmlSnippet: html.slice(0, 2000)
+      bodyText: bodyText.slice(0, 3000),
+      htmlSnippet: html.slice(0, 3000)
     });
   } catch (error) {
     if (browser) {
