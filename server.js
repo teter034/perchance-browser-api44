@@ -54,27 +54,21 @@ app.post("/generate", async (req, res) => {
       Object.defineProperty(navigator, "webdriver", {
         get: () => undefined
       });
-
       Object.defineProperty(navigator, "language", {
         get: () => "en-US"
       });
-
       Object.defineProperty(navigator, "languages", {
         get: () => ["en-US", "en"]
       });
-
       Object.defineProperty(navigator, "platform", {
         get: () => "Win32"
       });
-
       Object.defineProperty(navigator, "hardwareConcurrency", {
         get: () => 8
       });
-
       Object.defineProperty(navigator, "deviceMemory", {
         get: () => 8
       });
-
       window.chrome = { runtime: {} };
     });
 
@@ -89,156 +83,102 @@ app.post("/generate", async (req, res) => {
 
     await page.waitForTimeout(12000);
 
-    const title = await page.title();
-    const url = page.url();
+    const titleBefore = await page.title();
+    const urlBefore = page.url();
 
-    const visibleTextareas = await page.locator("textarea").evaluateAll((els) => {
-      return els.map((el, i) => {
-        const r = el.getBoundingClientRect();
-        const style = window.getComputedStyle(el);
-        return {
-          index: i,
-          id: el.id,
-          placeholder: el.getAttribute("placeholder"),
-          display: style.display,
-          visibility: style.visibility,
-          opacity: style.opacity,
-          width: r.width,
-          height: r.height,
-          disabled: el.disabled
-        };
-      });
+    const promptBox = page.locator("textarea.paragraph-input").first();
+    await promptBox.waitFor({ state: "attached", timeout: 30000 });
+
+    const promptDebug = await promptBox.evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
+      return {
+        className: el.className,
+        placeholder: el.getAttribute("placeholder"),
+        display: s.display,
+        visibility: s.visibility,
+        opacity: s.opacity,
+        width: r.width,
+        height: r.height,
+        disabled: el.disabled
+      };
     });
 
-    const promptSetResult = await page.evaluate((promptText) => {
-      const textareas = Array.from(document.querySelectorAll("textarea"));
-
-      const candidate = textareas.find((el) => {
-        const r = el.getBoundingClientRect();
-        const style = window.getComputedStyle(el);
-
-        return (
-          r.width > 100 &&
-          r.height > 20 &&
-          style.display !== "none" &&
-          style.visibility !== "hidden" &&
-          style.opacity !== "0" &&
-          !el.disabled
-        );
-      });
-
-      if (!candidate) {
-        return { ok: false, reason: "No suitable textarea found" };
-      }
-
-      candidate.focus();
-      candidate.value = promptText;
-      candidate.dispatchEvent(new Event("input", { bubbles: true }));
-      candidate.dispatchEvent(new Event("change", { bubbles: true }));
-
-      return {
-        ok: true,
-        id: candidate.id,
-        placeholder: candidate.getAttribute("placeholder")
-      };
+    await promptBox.evaluate((el, value) => {
+      el.focus();
+      el.value = value;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
     }, prompt);
 
-    if (!promptSetResult.ok) {
-      throw new Error(
-        `Prompt set failed: ${JSON.stringify({
-          promptSetResult,
-          visibleTextareas
-        })}`
-      );
-    }
+    const generateButton = page.locator("#generateButtonEl").first();
+    await generateButton.waitFor({ state: "attached", timeout: 30000 });
 
-    const visibleButtonsDebug = await page.locator("button").evaluateAll((els) => {
-      return els.map((el, i) => {
-        const r = el.getBoundingClientRect();
-        const style = window.getComputedStyle(el);
-        return {
-          index: i,
-          text: (el.innerText || el.textContent || "").trim(),
-          display: style.display,
-          visibility: style.visibility,
-          opacity: style.opacity,
-          width: r.width,
-          height: r.height,
-          disabled: el.disabled
-        };
-      });
-    });
-
-    const generateClicked = await page.evaluate(() => {
-      const buttons = Array.from(document.querySelectorAll("button"));
-
-      const btn = buttons.find((el) => {
-        const txt = (el.innerText || el.textContent || "").trim().toLowerCase();
-        const r = el.getBoundingClientRect();
-        const style = window.getComputedStyle(el);
-
-        return (
-          txt.includes("generate") &&
-          r.width > 20 &&
-          r.height > 20 &&
-          style.display !== "none" &&
-          style.visibility !== "hidden" &&
-          style.opacity !== "0" &&
-          !el.disabled
-        );
-      });
-
-      if (!btn) {
-        return { ok: false, reason: "Generate button not found" };
-      }
-
-      btn.click();
-
+    const buttonDebug = await generateButton.evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const s = window.getComputedStyle(el);
       return {
-        ok: true,
-        text: (btn.innerText || btn.textContent || "").trim()
+        id: el.id,
+        text: (el.innerText || el.textContent || "").trim(),
+        display: s.display,
+        visibility: s.visibility,
+        opacity: s.opacity,
+        width: r.width,
+        height: r.height,
+        disabled: el.disabled
       };
     });
 
-    if (!generateClicked.ok) {
-      throw new Error(
-        `Generate click failed: ${JSON.stringify({
-          generateClicked,
-          visibleButtonsDebug
-        })}`
-      );
-    }
+    await generateButton.evaluate((el) => el.click());
 
-    await page.waitForTimeout(15000);
+    await page.waitForTimeout(20000);
 
+    const titleAfter = await page.title();
+    const urlAfter = page.url();
     const bodyText = await page.locator("body").innerText().catch(() => "");
 
     const imageCandidates = await page.evaluate(() => {
       return Array.from(document.querySelectorAll("img"))
         .map((img) => ({
-          src: img.src,
+          id: img.id || "",
+          src: img.src || "",
           alt: img.alt || "",
           width: img.naturalWidth || 0,
           height: img.naturalHeight || 0,
-          className: img.className || ""
+          className: img.className || "",
+          title: img.title || ""
         }))
-        .filter((img) => img.src && !img.src.startsWith("data:"))
+        .filter((img) => img.src)
         .slice(0, 50);
+    });
+
+    const resultImg = await page.evaluate(() => {
+      const img = document.querySelector("#resultImgEl");
+      if (!img) return null;
+
+      return {
+        id: img.id || "",
+        src: img.getAttribute("src") || "",
+        title: img.getAttribute("title") || "",
+        width: img.naturalWidth || 0,
+        height: img.naturalHeight || 0
+      };
     });
 
     await browser.close();
 
     return res.json({
       ok: true,
-      message: "Generate button clicked",
+      message: "Generate attempted",
       prompt,
-      title,
-      url,
-      promptSetResult,
-      generateClicked,
-      visibleTextareas,
-      visibleButtonsDebug,
-      bodyText: bodyText.slice(0, 2000),
+      titleBefore,
+      urlBefore,
+      titleAfter,
+      urlAfter,
+      promptDebug,
+      buttonDebug,
+      resultImg,
+      bodyText: bodyText.slice(0, 3000),
       imageCandidates
     });
   } catch (error) {
