@@ -1,19 +1,3 @@
-import express from "express";
-import { chromium } from "playwright";
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-app.use(express.json({ limit: "10mb" }));
-
-app.get("/", (req, res) => {
-  res.json({ ok: true, message: "Server is running" });
-});
-
-app.get("/health", (req, res) => {
-  res.json({ ok: true, status: "healthy" });
-});
-
 app.post("/generate", async (req, res) => {
   const { prompt } = req.body || {};
 
@@ -83,19 +67,28 @@ app.post("/generate", async (req, res) => {
 
     await page.waitForTimeout(12000);
 
-    const promptBox = page.locator("textarea#input");
-    await promptBox.waitFor({ state: "visible", timeout: 60000 });
-    await promptBox.click();
-    await promptBox.fill(prompt);
+    const title = await page.title();
+    const url = page.url();
 
-    const generateButton = page.getByRole("button", { name: /generate/i });
+    const visibleTextareas = await page.locator("textarea:visible").count();
+    const visibleButtons = await page.locator("button:visible").count();
+
+    const promptBox = page.locator("textarea:visible").first();
+    await promptBox.waitFor({ state: "visible", timeout: 30000 });
+    await promptBox.click();
+    await promptBox.fill("");
+    await promptBox.type(prompt, { delay: 30 });
+
+    const generateButton = page
+      .locator("button:visible")
+      .filter({ hasText: /generate/i })
+      .first();
+
     await generateButton.waitFor({ state: "visible", timeout: 30000 });
     await generateButton.click();
 
     await page.waitForTimeout(15000);
 
-    const title = await page.title();
-    const url = page.url();
     const bodyText = await page.locator("body").innerText().catch(() => "");
 
     const imageCandidates = await page.evaluate(() => {
@@ -108,7 +101,7 @@ app.post("/generate", async (req, res) => {
           className: img.className || ""
         }))
         .filter((img) => img.src && !img.src.startsWith("data:"))
-        .slice(0, 30);
+        .slice(0, 50);
     });
 
     await browser.close();
@@ -119,6 +112,8 @@ app.post("/generate", async (req, res) => {
       prompt,
       title,
       url,
+      visibleTextareas,
+      visibleButtons,
       bodyText: bodyText.slice(0, 2000),
       imageCandidates
     });
@@ -132,8 +127,4 @@ app.post("/generate", async (req, res) => {
       error: String(error)
     });
   }
-});
-
-app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
 });
