@@ -81,13 +81,79 @@ app.post("/generate", async (req, res) => {
       timeout: 120000
     });
 
-    await page.waitForTimeout(12000);
+    await page.waitForTimeout(20000);
 
     const titleBefore = await page.title();
     const urlBefore = page.url();
 
-    const promptBox = page.locator("textarea.paragraph-input").first();
-    await promptBox.waitFor({ state: "attached", timeout: 30000 });
+    const frameDebug = [];
+    let targetFrame = null;
+
+    for (const frame of page.frames()) {
+      try {
+        const textareaCount = await frame.locator("textarea.paragraph-input").count();
+        const buttonCount = await frame.locator("#generateButtonEl").count();
+        const genericTextareaCount = await frame.locator("textarea").count();
+
+        frameDebug.push({
+          url: frame.url(),
+          name: frame.name(),
+          textareaCount,
+          buttonCount,
+          genericTextareaCount
+        });
+
+        if ((textareaCount > 0 || genericTextareaCount > 0) && buttonCount > 0) {
+          targetFrame = frame;
+        }
+      } catch (e) {
+        frameDebug.push({
+          url: frame.url(),
+          name: frame.name(),
+          error: String(e)
+        });
+      }
+    }
+
+    if (!targetFrame) {
+      const bodyText = await page.locator("body").innerText().catch(() => "");
+      const htmlSnippet = (await page.content()).slice(0, 3000);
+
+      await browser.close();
+
+      return res.status(500).json({
+        ok: false,
+        error: "Target frame not found",
+        titleBefore,
+        urlBefore,
+        frameDebug,
+        bodyText: bodyText.slice(0, 2000),
+        htmlSnippet
+      });
+    }
+
+    const promptBox = targetFrame.locator("textarea.paragraph-input").first();
+    const generateButton = targetFrame.locator("#generateButtonEl").first();
+
+    const promptExists = await promptBox.count();
+    const buttonExists = await generateButton.count();
+
+    if (!promptExists || !buttonExists) {
+      const bodyText = await page.locator("body").innerText().catch(() => "");
+
+      await browser.close();
+
+      return res.status(500).json({
+        ok: false,
+        error: "Prompt textarea or generate button missing in selected frame",
+        titleBefore,
+        urlBefore,
+        frameDebug,
+        promptExists,
+        buttonExists,
+        bodyText: bodyText.slice(0, 2000)
+      });
+    }
 
     const promptDebug = await promptBox.evaluate((el) => {
       const r = el.getBoundingClientRect();
@@ -104,16 +170,6 @@ app.post("/generate", async (req, res) => {
       };
     });
 
-    await promptBox.evaluate((el, value) => {
-      el.focus();
-      el.value = value;
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-    }, prompt);
-
-    const generateButton = page.locator("#generateButtonEl").first();
-    await generateButton.waitFor({ state: "attached", timeout: 30000 });
-
     const buttonDebug = await generateButton.evaluate((el) => {
       const r = el.getBoundingClientRect();
       const s = window.getComputedStyle(el);
@@ -128,6 +184,13 @@ app.post("/generate", async (req, res) => {
         disabled: el.disabled
       };
     });
+
+    await promptBox.evaluate((el, value) => {
+      el.focus();
+      el.value = value;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    }, prompt);
 
     await generateButton.evaluate((el) => el.click());
 
@@ -175,6 +238,8 @@ app.post("/generate", async (req, res) => {
       urlBefore,
       titleAfter,
       urlAfter,
+      targetFrameUrl: targetFrame.url(),
+      frameDebug,
       promptDebug,
       buttonDebug,
       resultImg,
