@@ -145,37 +145,31 @@ app.post("/generate", async (req, res) => {
           height: r.height,
           area: r.width * r.height,
           disabled: el.disabled,
-          valuePreview: (el.value || "").slice(0, 80)
+          valuePreview: (el.value || "").slice(0, 100)
         };
       });
     });
 
-    const promptSetResult = await targetFrame.evaluate((promptText) => {
+    const chosenIndex = await targetFrame.evaluate(() => {
       const textareas = Array.from(document.querySelectorAll("textarea"));
 
-      if (!textareas.length) {
-        return { ok: false, reason: "No textarea elements found" };
-      }
-
       const candidates = textareas
-        .filter((el) => !el.disabled)
         .map((el, index) => {
           const r = el.getBoundingClientRect();
           const s = window.getComputedStyle(el);
           return {
             index,
-            el,
             width: r.width,
             height: r.height,
             area: r.width * r.height,
             display: s.display,
             visibility: s.visibility,
             opacity: s.opacity,
-            placeholder: el.getAttribute("placeholder") || "",
-            className: el.className || ""
+            disabled: el.disabled
           };
         })
         .filter((x) =>
+          !x.disabled &&
           x.display !== "none" &&
           x.visibility !== "hidden" &&
           x.opacity !== "0" &&
@@ -184,47 +178,45 @@ app.post("/generate", async (req, res) => {
         )
         .sort((a, b) => b.area - a.area);
 
-      const chosen = candidates[0]?.el || null;
+      return candidates.length ? candidates[0].index : -1;
+    });
 
-      if (!chosen) {
-        return {
-          ok: false,
-          reason: "No visible usable textarea found",
-          candidateCount: candidates.length
-        };
-      }
-
-      chosen.focus();
-      chosen.value = "";
-      chosen.dispatchEvent(new Event("input", { bubbles: true }));
-      chosen.value = promptText;
-      chosen.dispatchEvent(new Event("input", { bubbles: true }));
-      chosen.dispatchEvent(new Event("change", { bubbles: true }));
-
-      return {
-        ok: true,
-        chosenId: chosen.id || "",
-        chosenClass: chosen.className || "",
-        chosenPlaceholder: chosen.getAttribute("placeholder") || "",
-        finalValue: chosen.value
-      };
-    }, prompt);
-
-    if (!promptSetResult.ok) {
+    if (chosenIndex < 0) {
       await browser.close();
       return res.status(500).json({
         ok: false,
-        error: "Prompt set failed",
+        error: "No visible usable textarea found",
         titleBefore,
         urlBefore,
         targetFrameUrl,
         frameDebug,
-        textareaDebug,
-        promptSetResult
+        textareaDebug
       });
     }
 
-    const buttonDebug = await targetFrame.locator("#generateButtonEl").evaluate((el) => {
+    const promptBox = targetFrame.locator("textarea").nth(chosenIndex);
+    await promptBox.scrollIntoViewIfNeeded().catch(() => {});
+    await promptBox.click({ timeout: 15000, force: true });
+
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
+    await page.keyboard.press("Backspace").catch(() => {});
+    await promptBox.fill("").catch(() => {});
+    await promptBox.type(prompt, { delay: 35 });
+
+    const promptSetResult = await promptBox.evaluate((el) => {
+      return {
+        ok: true,
+        chosenId: el.id || "",
+        chosenClass: el.className || "",
+        chosenPlaceholder: el.getAttribute("placeholder") || "",
+        finalValue: el.value || ""
+      };
+    });
+
+    const generateButton = targetFrame.locator("#generateButtonEl").first();
+    await generateButton.waitFor({ state: "attached", timeout: 30000 });
+
+    const buttonDebug = await generateButton.evaluate((el) => {
       const r = el.getBoundingClientRect();
       const s = window.getComputedStyle(el);
       return {
@@ -239,7 +231,7 @@ app.post("/generate", async (req, res) => {
       };
     });
 
-    await targetFrame.locator("#generateButtonEl").evaluate((el) => el.click());
+    await generateButton.click({ force: true });
 
     await page.waitForTimeout(30000);
 
@@ -247,22 +239,6 @@ app.post("/generate", async (req, res) => {
     const urlAfter = page.url();
     const bodyText = await page.locator("body").innerText().catch(() => "");
     const frameBodyText = await targetFrame.locator("body").innerText().catch(() => "");
-
-    const imageCandidates = await targetFrame.evaluate(() => {
-      return Array.from(document.querySelectorAll("img"))
-        .map((img) => ({
-          id: img.id || "",
-          src: img.getAttribute("src") || "",
-          currentSrc: img.currentSrc || "",
-          alt: img.alt || "",
-          title: img.title || "",
-          width: img.naturalWidth || 0,
-          height: img.naturalHeight || 0,
-          className: img.className || ""
-        }))
-        .filter((img) => img.src || img.currentSrc)
-        .slice(0, 50);
-    });
 
     const resultImg = await targetFrame.evaluate(() => {
       const byId = document.querySelector("#resultImgEl");
@@ -296,11 +272,27 @@ app.post("/generate", async (req, res) => {
       };
     });
 
+    const imageCandidates = await targetFrame.evaluate(() => {
+      return Array.from(document.querySelectorAll("img"))
+        .map((img) => ({
+          id: img.id || "",
+          src: img.getAttribute("src") || "",
+          currentSrc: img.currentSrc || "",
+          alt: img.alt || "",
+          title: img.title || "",
+          width: img.naturalWidth || 0,
+          height: img.naturalHeight || 0,
+          className: img.className || ""
+        }))
+        .filter((img) => img.src || img.currentSrc)
+        .slice(0, 50);
+    });
+
     await browser.close();
 
     return res.json({
       ok: true,
-      message: "Generate attempted with largest visible textarea strategy",
+      message: "Generate attempted with typed input strategy",
       prompt,
       titleBefore,
       urlBefore,
@@ -309,6 +301,7 @@ app.post("/generate", async (req, res) => {
       targetFrameUrl,
       frameDebug,
       textareaDebug,
+      chosenIndex,
       promptSetResult,
       buttonDebug,
       resultImg,
